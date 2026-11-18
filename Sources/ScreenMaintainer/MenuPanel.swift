@@ -250,8 +250,7 @@ struct MenuPanel: View {
                             .allowsHitTesting(false)
                     }
                     .padding(.horizontal, 9)
-                    .padding(.top, 7)
-                    .padding(.bottom, hasClamshellExtras ? 2 : 7)
+                    .padding(.vertical, 7)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
                 }
@@ -321,11 +320,6 @@ struct MenuPanel: View {
                     .padding(.bottom, 7)
                 }
             }
-            .animation(.smooth(duration: 0.25), value: store.clamshellConfirmNeeded)
-            .animation(.smooth(duration: 0.25), value: store.clamshellOn)
-            .animation(.smooth(duration: 0.25), value: store.clamshellDimCountdown)
-            .animation(.smooth(duration: 0.25), value: store.clamshellLeftover)
-            .animation(.smooth(duration: 0.25), value: store.clamshellError)
         }
     }
 
@@ -478,8 +472,7 @@ private struct OptionsAccordion: View {
                             .font(.system(size: 8.5, weight: .semibold))
                             .foregroundStyle(.secondary)
                             .rotationEffect(.degrees(expansion.isExpanded ? 90 : 0))
-                            .animation(.easeOut(duration: 0.16), value: expansion.isExpanded)
-                            .frame(width: 10)
+                            .frame(width: 12, height: 12)
 
                         Text("常规选项")
                             .font(.system(size: 10.5, weight: .medium))
@@ -497,6 +490,7 @@ private struct OptionsAccordion: View {
 
                         Spacer(minLength: 4)
                     }
+                    .frame(height: 18)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -573,8 +567,7 @@ private struct HoldersAccordion: View {
                                 .font(.system(size: 8.5, weight: .semibold))
                                 .foregroundStyle(.secondary)
                                 .rotationEffect(.degrees(expansion.isExpanded ? 90 : 0))
-                                .animation(.easeOut(duration: 0.16), value: expansion.isExpanded)
-                                .frame(width: 10)
+                                .frame(width: 12, height: 12)
 
                             Text("谁在阻止睡眠")
                                 .font(.system(size: 10.5, weight: .medium))
@@ -592,16 +585,18 @@ private struct HoldersAccordion: View {
 
                             Spacer(minLength: 4)
                         }
+                        .frame(height: 18)
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
 
-                    if expansion.isExpanded {
-                        AppleGlassIconButton(systemName: "arrow.clockwise") {
-                            store.refreshHolders()
-                        }
+                    AppleGlassIconButton(systemName: "arrow.clockwise") {
+                        store.refreshHolders()
                     }
+                    .opacity(expansion.isExpanded ? 1 : 0)
+                    .allowsHitTesting(expansion.isExpanded)
                 }
+                .frame(height: 18)
 
                 if expansion.isExpanded {
                     Divider().opacity(0.35)

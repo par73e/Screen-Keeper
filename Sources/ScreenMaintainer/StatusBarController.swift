@@ -12,6 +12,7 @@ final class StatusBarController: NSObject, NSWindowDelegate {
     private let statusItem: NSStatusItem
     private let panel: FloatingGlassPanel
     private let glassView: NSGlassEffectView
+    private let containerView: TopAnchoredContainerView
     private let hostingView: AutoSizingHostingView<MenuPanel>
 
     private var cancellables: Set<AnyCancellable> = []
@@ -27,6 +28,7 @@ final class StatusBarController: NSObject, NSWindowDelegate {
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         self.panel = FloatingGlassPanel()
         self.glassView = NSGlassEffectView()
+        self.containerView = TopAnchoredContainerView()
         self.hostingView = AutoSizingHostingView(rootView: MenuPanel(store: store))
 
         super.init()
@@ -50,13 +52,17 @@ final class StatusBarController: NSObject, NSWindowDelegate {
         glassView.cornerRadius = 18
         glassView.wantsLayer = true
 
+        containerView.translatesAutoresizingMaskIntoConstraints = true
+        containerView.autoresizingMask = [.width, .height]
+
         hostingView.translatesAutoresizingMaskIntoConstraints = true
-        hostingView.autoresizingMask = [.width, .height]
+        hostingView.autoresizingMask = [.width]
         hostingView.onSizeChange = { [weak self] newSize in
             self?.handleContentSizeChange(newSize)
         }
 
-        glassView.contentView = hostingView
+        containerView.addSubview(hostingView)
+        glassView.contentView = containerView
         panel.contentView = glassView
         panel.delegate = self
     }
@@ -128,9 +134,13 @@ final class StatusBarController: NSObject, NSWindowDelegate {
 
         let frame = panelFrame(for: contentSize, anchor: NSPoint(x: centerX, y: topY), visibleFrame: visibleFrame)
 
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         panel.setFrame(frame, display: true)
         glassView.frame = NSRect(origin: .zero, size: frame.size)
+        containerView.frame = NSRect(origin: .zero, size: frame.size)
         hostingView.frame = NSRect(origin: .zero, size: frame.size)
+        CATransaction.commit()
 
         panel.alphaValue = 0
         panel.makeKeyAndOrderFront(nil)
@@ -179,10 +189,14 @@ final class StatusBarController: NSObject, NSWindowDelegate {
         let visibleFrame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         let targetFrame = panelFrame(for: NSSize(width: width, height: height), anchor: anchor, visibleFrame: visibleFrame)
 
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         panel.setFrame(targetFrame, display: true)
         glassView.frame = NSRect(origin: .zero, size: targetFrame.size)
+        containerView.frame = NSRect(origin: .zero, size: targetFrame.size)
         hostingView.frame = NSRect(origin: .zero, size: targetFrame.size)
         panel.invalidateShadow()
+        CATransaction.commit()
     }
 
     // MARK: - 关闭监听（点击面板外部 / Esc / 失焦）
@@ -247,7 +261,12 @@ private final class FloatingGlassPanel: NSPanel {
     }
 }
 
-/// 监听 SwiftUI 内容固有尺寸变化（例如合盖二次确认展开/收起），同步面板高度且保持右上角锚点不变。
+/// 顶部锚定容器（isFlipped = true 使 y=0 永远贴紧面板顶边，展开/收起时不产生居中跳动）。
+private final class TopAnchoredContainerView: NSView {
+    override var isFlipped: Bool { true }
+}
+
+/// 监听 SwiftUI 内容固有尺寸变化（例如合盖二次确认展开/收起），同步面板高度且保持顶部中心锚点不变。
 private final class AutoSizingHostingView<Content: View>: NSHostingView<Content> {
     var onSizeChange: ((NSSize) -> Void)?
     private var lastReportedSize: NSSize = .zero
@@ -257,6 +276,7 @@ private final class AutoSizingHostingView<Content: View>: NSHostingView<Content>
         let size = fittingSize
         if abs(size.width - lastReportedSize.width) > 0.5 || abs(size.height - lastReportedSize.height) > 0.5 {
             lastReportedSize = size
+            frame = NSRect(origin: .zero, size: size)
             DispatchQueue.main.async { [weak self] in
                 self?.onSizeChange?(size)
             }
