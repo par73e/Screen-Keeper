@@ -80,9 +80,8 @@ final class StatusBarController: NSObject, NSWindowDelegate {
             .store(in: &cancellables)
 
         if let button = statusItem.button {
-            appearanceObservation = button.observe(\.effectiveAppearance, options: [.new]) { [weak self] _, _ in
+            appearanceObservation = button.observe(\.effectiveAppearance, options: []) { [weak self] _, _ in
                 DispatchQueue.main.async {
-                    self?.lastIconKey = ""
                     self?.updateStatusIcon()
                 }
             }
