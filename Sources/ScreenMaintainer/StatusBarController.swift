@@ -48,8 +48,8 @@ final class StatusBarController: NSObject, NSWindowDelegate {
     }
 
     private func configurePanel() {
-        glassView.style = .clear
-        glassView.cornerRadius = 20
+        glassView.style = .regular
+        glassView.cornerRadius = 18
         glassView.tintColor = nil
         glassView.wantsLayer = true
 

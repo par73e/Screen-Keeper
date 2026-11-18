@@ -91,26 +91,20 @@ struct MenuPanel: View {
                     if store.durationChoice == 0 {
                         Text("∞")
                             .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(.white)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 2)
-                            .glassEffect(.clear.tint(modeAccentColor), in: Capsule())
-                            .overlay(
-                                Capsule()
-                                    .strokeBorder(.white.opacity(scheme == .dark ? 0.26 : 0.52), lineWidth: 0.55)
-                            )
+                            .background(Capsule().fill(modeAccentColor.opacity(0.90)))
                     } else {
                         Text(store.remainingText)
                             .font(.system(size: 10.5, weight: .medium))
                             .monospacedDigit()
+                            .foregroundStyle(.white)
                             .lineLimit(1)
                             .padding(.horizontal, 7)
                             .padding(.vertical, 3)
                             .frame(width: 72)
-                            .glassEffect(.clear.tint(modeAccentColor), in: Capsule())
-                            .overlay(
-                                Capsule()
-                                    .strokeBorder(.white.opacity(scheme == .dark ? 0.26 : 0.52), lineWidth: 0.55)
-                            )
+                            .background(Capsule().fill(modeAccentColor.opacity(0.90)))
                     }
                 } else {
                     Color.clear
@@ -710,7 +704,7 @@ private struct LuminousGlassTile<ShapeType: InsettableShape, Content: View>: Vie
 
     private var restingDimOpacity: Double {
         if activeHover || isSelected { return 0 }
-        return scheme == .dark ? 0.10 : 0.03
+        return scheme == .dark ? 0.18 : 0.05
     }
 
     private var topSheenOpacity: Double {
@@ -771,7 +765,7 @@ private struct GroupedSurface<ShapeType: InsettableShape, Content: View>: View {
             .padding(8)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
-                shape.fill(Color.black.opacity(scheme == .dark ? 0.09 : 0.028))
+                shape.fill(Color.black.opacity(scheme == .dark ? 0.15 : 0.04))
             )
             .overlay(
                 shape.strokeBorder(
