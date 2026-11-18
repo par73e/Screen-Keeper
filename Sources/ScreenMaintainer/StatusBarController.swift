@@ -51,7 +51,6 @@ final class StatusBarController: NSObject, NSWindowDelegate {
         glassView.style = .regular
         glassView.cornerRadius = 18
         glassView.tintColor = nil
-        glassView.wantsLayer = true
 
         containerView.translatesAutoresizingMaskIntoConstraints = true
         containerView.autoresizingMask = [.width, .height]
@@ -195,7 +194,6 @@ final class StatusBarController: NSObject, NSWindowDelegate {
         glassView.frame = NSRect(origin: .zero, size: targetFrame.size)
         containerView.frame = NSRect(origin: .zero, size: targetFrame.size)
         hostingView.frame = NSRect(origin: .zero, size: targetFrame.size)
-        panel.invalidateShadow()
         CATransaction.commit()
     }
 
@@ -244,7 +242,7 @@ private final class FloatingGlassPanel: NSPanel {
         )
         isOpaque = false
         backgroundColor = .clear
-        hasShadow = true
+        hasShadow = false
         level = .popUpMenu
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
         isMovable = false
