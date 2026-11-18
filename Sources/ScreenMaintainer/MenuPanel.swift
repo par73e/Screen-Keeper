@@ -34,6 +34,14 @@ struct MenuPanel: View {
         }
     }
 
+    private var modeAccentColor: Color {
+        switch store.mode {
+        case .systemAwake: return .green
+        case .displayAwake: return .orange
+        case .off: return .secondary
+        }
+    }
+
     // MARK: - 顶部：图标 / 名称 / 电源状态 / 剩余时间（固定几何槽位，秒级倒计时不抖动）
 
     private var header: some View {
@@ -42,8 +50,8 @@ struct MenuPanel: View {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(
                         store.mode != .off
-                        ? Color.green.opacity(scheme == .dark ? 0.24 : 0.18)
-                        : Color.black.opacity(scheme == .dark ? 0.20 : 0.05)
+                        ? modeAccentColor.opacity(scheme == .dark ? 0.24 : 0.18)
+                        : Color.black.opacity(scheme == .dark ? 0.12 : 0.04)
                     )
                 Image(nsImage: MenuBarIcon.image(for: store.iconState,
                                                  dark: scheme == .dark,
@@ -57,8 +65,8 @@ struct MenuPanel: View {
             .overlay(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .strokeBorder(
-                        .white.opacity(scheme == .dark ? 0.22 : 0.65),
-                        lineWidth: 0.6
+                        .white.opacity(scheme == .dark ? 0.24 : 0.68),
+                        lineWidth: 0.65
                     )
             )
 
@@ -85,10 +93,10 @@ struct MenuPanel: View {
                             .font(.system(size: 13, weight: .semibold))
                             .padding(.horizontal, 10)
                             .padding(.vertical, 2)
-                            .glassEffect(.regular.tint(.green), in: Capsule())
+                            .glassEffect(.clear.tint(modeAccentColor), in: Capsule())
                             .overlay(
                                 Capsule()
-                                    .strokeBorder(.white.opacity(scheme == .dark ? 0.22 : 0.45), lineWidth: 0.5)
+                                    .strokeBorder(.white.opacity(scheme == .dark ? 0.26 : 0.52), lineWidth: 0.55)
                             )
                     } else {
                         Text(store.remainingText)
@@ -98,10 +106,10 @@ struct MenuPanel: View {
                             .padding(.horizontal, 7)
                             .padding(.vertical, 3)
                             .frame(width: 72)
-                            .glassEffect(.regular.tint(.green), in: Capsule())
+                            .glassEffect(.clear.tint(modeAccentColor), in: Capsule())
                             .overlay(
                                 Capsule()
-                                    .strokeBorder(.white.opacity(scheme == .dark ? 0.22 : 0.45), lineWidth: 0.5)
+                                    .strokeBorder(.white.opacity(scheme == .dark ? 0.26 : 0.52), lineWidth: 0.55)
                             )
                     }
                 } else {
@@ -142,15 +150,21 @@ struct MenuPanel: View {
                          title: String,
                          subtitle: String) -> some View {
         let selected = (store.mode == m)
-        let isActiveMode = (m != .off)
-        let tint: Color? = (selected && isActiveMode) ? .green : nil
+        let accent: Color? = {
+            switch m {
+            case .systemAwake: return .green
+            case .displayAwake: return .orange
+            case .off: return nil
+            }
+        }()
+        let tint: Color? = selected ? accent : nil
 
         return ModeRowButton(
             icon: icon,
             title: title,
             subtitle: subtitle,
             selected: selected,
-            isActiveAccent: isActiveMode,
+            accentColor: accent,
             tint: tint,
             shape: rowShape
         ) {
@@ -202,8 +216,12 @@ struct MenuPanel: View {
         store.clamshellConfirmNeeded || store.clamshellLeftover || store.clamshellOn || store.clamshellError != nil
     }
 
+    private var clamshellLocked: Bool {
+        store.mode == .off && !store.clamshellOn
+    }
+
     private func toggleClamshell() {
-        guard !store.clamshellBusy else { return }
+        guard !store.clamshellBusy, !clamshellLocked else { return }
         if store.clamshellOn {
             store.setClamshellEnabled(false)
         } else if store.clamshellConfirmNeeded {
@@ -216,7 +234,8 @@ struct MenuPanel: View {
     private var clamshellSection: some View {
         LuminousGlassTile(shape: cardShape,
                           tint: store.clamshellOn ? .orange : nil,
-                          isSelected: store.clamshellOn) { hovered in
+                          isSelected: store.clamshellOn,
+                          isEnabled: !clamshellLocked) { hovered in
             VStack(alignment: .leading, spacing: 6) {
                 Button(action: toggleClamshell) {
                     HStack(spacing: 8) {
@@ -225,14 +244,15 @@ struct MenuPanel: View {
                                 .fill(clamshellBadgeFill(hovered: hovered))
                             Image(systemName: "laptopcomputer")
                                 .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(store.clamshellOn ? .white : (hovered ? .primary : .secondary))
+                                .foregroundStyle(store.clamshellOn ? .white : (hovered && !clamshellLocked ? .primary : .secondary))
                         }
                         .frame(width: 24, height: 24)
 
                         VStack(alignment: .leading, spacing: 1) {
                             Text("合盖保持运行")
                                 .font(.system(size: 12, weight: .medium))
-                            Text("合盖不睡眠，开盖自动恢复")
+                                .foregroundStyle(clamshellLocked ? .secondary : .primary)
+                            Text(clamshellLocked ? "需先开启唤醒模式" : "合盖不睡眠，开盖自动恢复")
                                 .font(.system(size: 9.5))
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
@@ -246,7 +266,7 @@ struct MenuPanel: View {
                         Toggle("", isOn: .constant(store.clamshellOn))
                             .labelsHidden()
                             .controlSize(.mini)
-                            .disabled(store.clamshellBusy)
+                            .disabled(store.clamshellBusy || clamshellLocked)
                             .allowsHitTesting(false)
                     }
                     .padding(.horizontal, 9)
@@ -255,7 +275,8 @@ struct MenuPanel: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .disabled(store.clamshellBusy)
+                .disabled(store.clamshellBusy || clamshellLocked)
+                .opacity(clamshellLocked ? 0.58 : 1)
 
                 if hasClamshellExtras {
                     VStack(alignment: .leading, spacing: 6) {
@@ -360,7 +381,7 @@ private struct ModeRowButton: View {
     let title: String
     let subtitle: String
     let selected: Bool
-    let isActiveAccent: Bool
+    let accentColor: Color?
     let tint: Color?
     let shape: RoundedRectangle
     let action: () -> Void
@@ -376,7 +397,7 @@ private struct ModeRowButton: View {
                             .fill(badgeFill(hovered: hovered))
                             .overlay(
                                 Circle()
-                                    .strokeBorder(.white.opacity(badgeRimOpacity(hovered: hovered)), lineWidth: 0.6)
+                                    .strokeBorder(.white.opacity(badgeRimOpacity(hovered: hovered)), lineWidth: 0.65)
                             )
                         Image(systemName: icon)
                             .font(.system(size: 11, weight: .semibold))
@@ -390,7 +411,7 @@ private struct ModeRowButton: View {
                             .foregroundStyle(.primary)
                         Text(subtitle)
                             .font(.system(size: 9.5))
-                            .foregroundStyle(Color.primary.opacity(hovered || selected ? 0.72 : 0.52))
+                            .foregroundStyle(Color.primary.opacity(hovered || selected ? 0.72 : 0.54))
                             .lineLimit(1)
                     }
 
@@ -398,7 +419,7 @@ private struct ModeRowButton: View {
 
                     Image(systemName: "checkmark")
                         .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(isActiveAccent ? Color.green : Color.primary.opacity(0.75))
+                        .foregroundStyle(accentColor ?? Color.primary.opacity(0.80))
                         .opacity(selected ? 1 : 0)
                         .frame(width: 14)
                 }
@@ -412,25 +433,25 @@ private struct ModeRowButton: View {
     }
 
     private func badgeFill(hovered: Bool) -> Color {
-        if selected && isActiveAccent {
-            return hovered ? Color.green.opacity(0.95) : Color.green
+        if selected, let accentColor {
+            return hovered ? accentColor.opacity(0.92) : accentColor
         }
         if selected {
-            return Color.primary.opacity(scheme == .dark ? 0.24 : 0.14)
+            return Color.primary.opacity(scheme == .dark ? 0.28 : 0.16)
         }
         if hovered {
             return Color.primary.opacity(scheme == .dark ? 0.18 : 0.11)
         }
-        return Color.primary.opacity(scheme == .dark ? 0.09 : 0.06)
+        return Color.primary.opacity(scheme == .dark ? 0.08 : 0.05)
     }
 
     private func badgeRimOpacity(hovered: Bool) -> Double {
-        if selected || hovered { return scheme == .dark ? 0.28 : 0.45 }
-        return scheme == .dark ? 0.08 : 0.15
+        if selected || hovered { return scheme == .dark ? 0.34 : 0.55 }
+        return scheme == .dark ? 0.10 : 0.20
     }
 
     private func iconColor(hovered: Bool) -> Color {
-        if selected && isActiveAccent { return .white }
+        if selected && accentColor != nil { return .white }
         if selected || hovered { return .primary }
         return .secondary
     }
@@ -611,13 +632,14 @@ private struct HoldersAccordion: View {
     }
 }
 
-/// 核心光学悬停容器（嵌于外层 NSGlassEffectView 内）：
-/// - 未悬停且未选中时呈现略微收敛的半透明暗底（"暗"）；悬停时暗底退去并渐显苹果 Control Center 式的顶光镜面漫反射与高光描边（"点亮"）
-/// - 选中态直接透出柔和色彩光晕或亮面玻璃质感；零 offset / 零 scale / 零指针弹性晃动，100% 原地固定
+/// 核心光学悬停容器（嵌于清透 NSGlassEffectView 内）：
+/// - 未悬停且未选中时呈现极轻透的半透明底色与清晰高光边；悬停时渐显苹果 Control Center 式顶光漫反射与高光描边（"由暗变点亮"）
+/// - 无色选中态（如「关闭」）带独立卡片衬底与鲜明边缘，避免融入背景；零 offset / 零 scale，100% 原地固定
 private struct LuminousGlassTile<ShapeType: InsettableShape, Content: View>: View {
     let shape: ShapeType
     let tint: Color?
     let isSelected: Bool
+    let isEnabled: Bool
     let content: (Bool) -> Content
 
     @StateObject private var hover = HoverModel()
@@ -626,22 +648,28 @@ private struct LuminousGlassTile<ShapeType: InsettableShape, Content: View>: Vie
     init(shape: ShapeType,
          tint: Color? = nil,
          isSelected: Bool = false,
+         isEnabled: Bool = true,
          @ViewBuilder content: @escaping (Bool) -> Content) {
         self.shape = shape
         self.tint = tint
         self.isSelected = isSelected
+        self.isEnabled = isEnabled
         self.content = content
     }
 
+    private var activeHover: Bool {
+        isEnabled && hover.isHovered
+    }
+
     var body: some View {
-        content(hover.isHovered)
+        content(activeHover)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background {
                 ZStack {
                     if let tint, isSelected {
-                        shape.fill(tint.opacity(scheme == .dark ? 0.24 : 0.17))
+                        shape.fill(tint.opacity(scheme == .dark ? 0.22 : 0.17))
                     } else if isSelected {
-                        shape.fill(Color.white.opacity(scheme == .dark ? 0.12 : 0.45))
+                        shape.fill(Color.primary.opacity(scheme == .dark ? 0.14 : 0.085))
                     } else {
                         shape.fill(Color.black.opacity(restingDimOpacity))
                     }
@@ -668,7 +696,7 @@ private struct LuminousGlassTile<ShapeType: InsettableShape, Content: View>: Vie
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     ),
-                    lineWidth: hover.isHovered ? 0.85 : 0.55
+                    lineWidth: (activeHover || isSelected) ? 0.85 : 0.6
                 )
                 .allowsHitTesting(false)
             }
@@ -681,53 +709,53 @@ private struct LuminousGlassTile<ShapeType: InsettableShape, Content: View>: Vie
     }
 
     private var restingDimOpacity: Double {
-        if hover.isHovered || isSelected { return 0 }
-        return scheme == .dark ? 0.20 : 0.055
+        if activeHover || isSelected { return 0 }
+        return scheme == .dark ? 0.10 : 0.03
     }
 
     private var topSheenOpacity: Double {
-        if hover.isHovered {
-            return scheme == .dark ? 0.18 : 0.52
+        if activeHover {
+            return scheme == .dark ? 0.18 : 0.46
         }
         if isSelected {
-            return scheme == .dark ? 0.08 : 0.22
+            return scheme == .dark ? 0.09 : 0.28
         }
         return 0
     }
 
     private var bottomSheenOpacity: Double {
-        if hover.isHovered {
-            return scheme == .dark ? 0.06 : 0.18
+        if activeHover {
+            return scheme == .dark ? 0.05 : 0.14
         }
         if isSelected {
-            return scheme == .dark ? 0.02 : 0.06
+            return scheme == .dark ? 0.02 : 0.08
         }
         return 0
     }
 
     private var topBorderOpacity: Double {
-        if hover.isHovered {
-            return scheme == .dark ? 0.48 : 0.90
+        if activeHover {
+            return scheme == .dark ? 0.50 : 0.90
         }
         if isSelected {
-            return scheme == .dark ? 0.30 : 0.65
+            return scheme == .dark ? 0.40 : 0.82
         }
-        return scheme == .dark ? 0.11 : 0.32
+        return scheme == .dark ? 0.15 : 0.42
     }
 
     private var bottomBorderOpacity: Double {
-        if hover.isHovered {
-            return scheme == .dark ? 0.15 : 0.34
+        if activeHover {
+            return scheme == .dark ? 0.16 : 0.36
         }
         if isSelected {
-            return scheme == .dark ? 0.09 : 0.20
+            return scheme == .dark ? 0.14 : 0.30
         }
-        return scheme == .dark ? 0.03 : 0.12
+        return scheme == .dark ? 0.04 : 0.16
     }
 }
 
 /// 静态分组容器（用于定时、开关选项、阻止睡眠列表）：
-/// 透出外层 NSGlassEffectView 的背景折射，同时用克制内衬与细微镜面描边清晰分组，鼠标经过时纹丝不动。
+/// 保持清透玻璃穿透过底感，仅用极轻内衬与细高光边区分层级，鼠标经过时纹丝不动。
 private struct GroupedSurface<ShapeType: InsettableShape, Content: View>: View {
     let shape: ShapeType
     let content: Content
@@ -743,19 +771,19 @@ private struct GroupedSurface<ShapeType: InsettableShape, Content: View>: View {
             .padding(8)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
-                shape.fill(Color.black.opacity(scheme == .dark ? 0.16 : 0.04))
+                shape.fill(Color.black.opacity(scheme == .dark ? 0.09 : 0.028))
             )
             .overlay(
                 shape.strokeBorder(
                     LinearGradient(
                         colors: [
-                            .white.opacity(scheme == .dark ? 0.12 : 0.45),
-                            .white.opacity(scheme == .dark ? 0.03 : 0.14)
+                            .white.opacity(scheme == .dark ? 0.16 : 0.52),
+                            .white.opacity(scheme == .dark ? 0.04 : 0.16)
                         ],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     ),
-                    lineWidth: 0.55
+                    lineWidth: 0.6
                 )
                 .allowsHitTesting(false)
             )

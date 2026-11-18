@@ -203,9 +203,13 @@ final class PowerStore: ObservableObject {
         deadline = nil
         remainingText = ""
         activeDuration = 0
+        clamshellConfirmNeeded = false
         applyAssertions()
         persistMode()
         refreshHolders()
+        if clamshellOn {
+            setClamshellEnabled(false)
+        }
     }
 
     private func applyAssertions() {
@@ -316,11 +320,13 @@ final class PowerStore: ObservableObject {
     // MARK: - 合盖不睡眠（系统级 disablesleep，带护栏）
 
     func requestClamshellEnable() {
+        guard mode != .off else { return }
         clamshellConfirmNeeded = true
     }
 
     func confirmClamshellEnable() {
         clamshellConfirmNeeded = false
+        guard mode != .off else { return }
         clamshellWarningSeen = true
         Self.defaults.set(true, forKey: Keys.clamshellWarningSeen)
         setClamshellEnabled(true)
