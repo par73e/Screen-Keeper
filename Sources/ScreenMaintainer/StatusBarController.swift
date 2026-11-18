@@ -2,39 +2,36 @@ import AppKit
 import SwiftUI
 import Combine
 
-/// 基于 NSStatusItem + 无边框透明 NSPanel + NSGlassEffectView 的苹果控制中心式弹出面板：
-/// - 居中展开：面板顶部中心对齐菜单栏图标中心（并在屏幕左右边缘自动做安全限位）
-/// - 原生 NSGlassEffectView 外壳：直接折射屏幕壁纸与底层窗口，带真实圆角镜面边缘与实时景深
-/// - 原地固定：无 NSPopover 箭头框，随内容展开（如合盖二次确认、阻止睡眠列表）保持顶部中心锚定、向下平滑伸展
+/// 基于 NSStatusItem + 原生 NSPopover 的菜单栏弹出面板：
+/// - 原生系统圆角磨砂玻璃窗口：完全消除无边框 NSPanel 在 WindowServer 下的外围矩形黑线框
+/// - 自动居中对齐：通过 `popover.show(relativeTo:of:preferredEdge: .minY)` 居中于菜单栏图标下方
+/// - 顶部锚定零跳动：内部使用翻转容器 `TopAnchoredContainerView` + 无动画同步 `popover.contentSize`，展开/收起不跳动
 @MainActor
-final class StatusBarController: NSObject, NSWindowDelegate {
+final class StatusBarController: NSObject, NSPopoverDelegate {
     private let store: PowerStore
     private let statusItem: NSStatusItem
-    private let panel: FloatingGlassPanel
-    private let glassView: NSGlassEffectView
+    private let popover: NSPopover
+    private let contentController: NSViewController
     private let containerView: TopAnchoredContainerView
     private let hostingView: AutoSizingHostingView<MenuPanel>
 
     private var cancellables: Set<AnyCancellable> = []
     private var appearanceObservation: NSKeyValueObservation?
-    private var globalMouseMonitor: Any?
-    private var localKeyMonitor: Any?
     private var lastIconKey: String = ""
     private var lastClosedAt: Date = .distantPast
-    private var anchoredTopCenter: NSPoint?
 
     init(store: PowerStore) {
         self.store = store
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        self.panel = FloatingGlassPanel()
-        self.glassView = NSGlassEffectView()
+        self.popover = NSPopover()
+        self.contentController = NSViewController()
         self.containerView = TopAnchoredContainerView()
         self.hostingView = AutoSizingHostingView(rootView: MenuPanel(store: store))
 
         super.init()
 
         configureStatusButton()
-        configurePanel()
+        configurePopover()
         bindUpdates()
         updateStatusIcon()
     }
@@ -47,11 +44,7 @@ final class StatusBarController: NSObject, NSWindowDelegate {
         button.sendAction(on: [.leftMouseDown, .rightMouseDown])
     }
 
-    private func configurePanel() {
-        glassView.style = .regular
-        glassView.cornerRadius = 18
-        glassView.tintColor = nil
-
+    private func configurePopover() {
         containerView.translatesAutoresizingMaskIntoConstraints = true
         containerView.autoresizingMask = [.width, .height]
 
@@ -62,9 +55,12 @@ final class StatusBarController: NSObject, NSWindowDelegate {
         }
 
         containerView.addSubview(hostingView)
-        glassView.contentView = containerView
-        panel.contentView = glassView
-        panel.delegate = self
+        contentController.view = containerView
+
+        popover.contentViewController = contentController
+        popover.behavior = .transient
+        popover.animates = true
+        popover.delegate = self
     }
 
     private func bindUpdates() {
@@ -78,6 +74,7 @@ final class StatusBarController: NSObject, NSWindowDelegate {
             }
             .store(in: &cancellables)
 
+        // 不清空 lastIconKey，避免 AppKit 重绘菜单栏图标快照触发 KVO 造成重绘死循环
         if let button = statusItem.button {
             appearanceObservation = button.observe(\.effectiveAppearance, options: []) { [weak self] _, _ in
                 DispatchQueue.main.async {
@@ -100,11 +97,11 @@ final class StatusBarController: NSObject, NSWindowDelegate {
     }
 
     @objc private func togglePanel() {
-        if panel.isVisible {
-            closePanel()
+        if popover.isShown {
+            popover.performClose(nil)
             return
         }
-        // 避免刚因点击菜单栏图标触发 resignKey 关闭后在同一点击周期内立即重开
+        // 避免刚因点击菜单栏图标触发 transient 关闭后在同一点击周期内立即重开
         if Date().timeIntervalSince(lastClosedAt) < 0.15 {
             return
         }
@@ -112,56 +109,26 @@ final class StatusBarController: NSObject, NSWindowDelegate {
     }
 
     private func openPanel() {
-        guard let button = statusItem.button, let buttonWindow = button.window else { return }
+        guard let button = statusItem.button else { return }
 
         store.refreshHolders()
         store.startHoldersAutoRefresh()
 
-        // 先刷新一次宿主视图尺寸
         hostingView.layoutSubtreeIfNeeded()
-        let contentSize = measuredSize()
-
-        let buttonInWindow = button.convert(button.bounds, to: nil)
-        let buttonScreenRect = buttonWindow.convertToScreen(buttonInWindow)
-        let screen = buttonWindow.screen ?? NSScreen.main
-        let visibleFrame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-
-        // 居中展开：面板水平中心对齐菜单栏图标中心（buttonScreenRect.midX），并在屏幕可视边界内留 8pt 安全边距
-        let topY = buttonScreenRect.minY - 6
-        let centerX = buttonScreenRect.midX
-        anchoredTopCenter = NSPoint(x: centerX, y: topY)
-
-        let frame = panelFrame(for: contentSize, anchor: NSPoint(x: centerX, y: topY), visibleFrame: visibleFrame)
+        let size = measuredSize()
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        panel.setFrame(frame, display: true)
-        glassView.frame = NSRect(origin: .zero, size: frame.size)
-        containerView.frame = NSRect(origin: .zero, size: frame.size)
-        hostingView.frame = NSRect(origin: .zero, size: frame.size)
+        containerView.frame = NSRect(origin: .zero, size: size)
+        hostingView.frame = NSRect(origin: .zero, size: size)
+        popover.contentSize = size
         CATransaction.commit()
 
-        panel.alphaValue = 0
-        panel.makeKeyAndOrderFront(nil)
-        button.highlight(true)
-
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.14
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            panel.animator().alphaValue = 1
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        if let popoverWindow = popover.contentViewController?.view.window {
+            popoverWindow.acceptsMouseMovedEvents = true
+            popoverWindow.makeKey()
         }
-
-        installMonitors()
-    }
-
-    func closePanel() {
-        guard panel.isVisible else { return }
-        lastClosedAt = Date()
-        removeMonitors()
-        store.stopHoldersAutoRefresh()
-        statusItem.button?.highlight(false)
-        panel.orderOut(nil)
-        anchoredTopCenter = nil
     }
 
     private func measuredSize() -> NSSize {
@@ -169,93 +136,28 @@ final class StatusBarController: NSObject, NSWindowDelegate {
         return NSSize(width: max(296, fit.width), height: max(120, fit.height))
     }
 
-    private func panelFrame(for size: NSSize, anchor: NSPoint, visibleFrame: NSRect) -> NSRect {
-        let minX = visibleFrame.minX + 8
-        let maxX = max(minX, visibleFrame.maxX - size.width - 8)
-        let originX = max(minX, min(anchor.x - size.width / 2, maxX)).rounded()
-        let originY = max(visibleFrame.minY + 8, anchor.y - size.height).rounded()
-        return NSRect(x: originX, y: originY, width: size.width, height: size.height)
-    }
-
     private func handleContentSizeChange(_ newSize: NSSize) {
-        guard panel.isVisible, let anchor = anchoredTopCenter else { return }
-        let width = max(296, newSize.width)
-        let height = max(120, newSize.height)
-        let current = panel.frame
-        guard abs(current.width - width) > 0.5 || abs(current.height - height) > 0.5 else { return }
+        guard popover.isShown else { return }
+        let targetSize = NSSize(width: max(296, newSize.width), height: max(120, newSize.height))
+        let current = popover.contentSize
+        guard abs(current.width - targetSize.width) > 0.5 || abs(current.height - targetSize.height) > 0.5 else { return }
 
-        let screen = panel.screen ?? NSScreen.main
-        let visibleFrame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        let targetFrame = panelFrame(for: NSSize(width: width, height: height), anchor: anchor, visibleFrame: visibleFrame)
-
+        let wasAnimated = popover.animates
+        popover.animates = false
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        panel.setFrame(targetFrame, display: true)
-        glassView.frame = NSRect(origin: .zero, size: targetFrame.size)
-        containerView.frame = NSRect(origin: .zero, size: targetFrame.size)
-        hostingView.frame = NSRect(origin: .zero, size: targetFrame.size)
+        containerView.frame = NSRect(origin: .zero, size: targetSize)
+        hostingView.frame = NSRect(origin: .zero, size: targetSize)
+        popover.contentSize = targetSize
         CATransaction.commit()
+        popover.animates = wasAnimated
     }
 
-    // MARK: - 关闭监听（点击面板外部 / Esc / 失焦）
+    // MARK: - NSPopoverDelegate
 
-    private func installMonitors() {
-        removeMonitors()
-        globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.closePanel()
-            }
-        }
-        localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            if event.keyCode == 53 { // Escape
-                self?.closePanel()
-                return nil
-            }
-            return event
-        }
-    }
-
-    private func removeMonitors() {
-        if let m = globalMouseMonitor {
-            NSEvent.removeMonitor(m)
-            globalMouseMonitor = nil
-        }
-        if let m = localKeyMonitor {
-            NSEvent.removeMonitor(m)
-            localKeyMonitor = nil
-        }
-    }
-
-    func windowDidResignKey(_ notification: Notification) {
-        closePanel()
-    }
-}
-
-/// 无边框浮动玻璃面板：支持成为 key window（接收悬停与 Esc），但不强夺其他应用激活状态。
-private final class FloatingGlassPanel: NSPanel {
-    init() {
-        super.init(
-            contentRect: NSRect(x: 0, y: 0, width: 296, height: 400),
-            styleMask: [.borderless, .nonactivatingPanel],
-            backing: .buffered,
-            defer: false
-        )
-        isOpaque = false
-        backgroundColor = .clear
-        hasShadow = false
-        level = .popUpMenu
-        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
-        isMovable = false
-        acceptsMouseMovedEvents = true
-        isFloatingPanel = true
-        hidesOnDeactivate = false
-    }
-
-    override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { false }
-
-    override func cancelOperation(_ sender: Any?) {
-        orderOut(nil)
+    func popoverDidClose(_ notification: Notification) {
+        lastClosedAt = Date()
+        store.stopHoldersAutoRefresh()
     }
 }
 
@@ -264,7 +166,7 @@ private final class TopAnchoredContainerView: NSView {
     override var isFlipped: Bool { true }
 }
 
-/// 监听 SwiftUI 内容固有尺寸变化（例如合盖二次确认展开/收起），同步面板高度且保持顶部中心锚点不变。
+/// 监听 SwiftUI 内容固有尺寸变化（例如合盖二次确认展开/收起），同步面板高度。
 private final class AutoSizingHostingView<Content: View>: NSHostingView<Content> {
     var onSizeChange: ((NSSize) -> Void)?
     private var lastReportedSize: NSSize = .zero
