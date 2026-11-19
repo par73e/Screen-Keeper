@@ -11,9 +11,9 @@ enum ClamshellMode {
     private static let sudoersPath = "/etc/sudoers.d/screenmaintainer"
 
     /// 读取当前合盖物理状态（AppleClamshellState）；true = 笔记本已合盖。
-    static var isLidClosed: Bool {
+    static var lidClosed: Bool? {
         let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPMrootDomain"))
-        guard service != IO_OBJECT_NULL else { return false }
+        guard service != IO_OBJECT_NULL else { return nil }
         defer { IOObjectRelease(service) }
         guard let prop = IORegistryEntryCreateCFProperty(
             service,
@@ -21,151 +21,87 @@ enum ClamshellMode {
             kCFAllocatorDefault,
             0
         )?.takeRetainedValue() as? Bool else {
-            return false
+            return nil
         }
         return prop
     }
 
-    /// 读取当前系统 SleepDisabled 标志（只读，无需授权）。
-    static var isSleepDisabled: Bool {
-        let out = ProcessRunner.run(pmsetPath, ["-g"]).stdout
-        for line in out.components(separatedBy: "\n") {
-            let t = line.trimmingCharacters(in: .whitespaces)
-            guard t.hasPrefix("SleepDisabled") else { continue }
-            let parts = t.split(whereSeparator: \.isWhitespace)
-            if let last = parts.last {
-                return last == "1"
-            }
-        }
-        return false
+    /// nil 表示读取失败，调用方不能据此清除恢复记录。
+    static var sleepDisabled: Bool? {
+        let result = ProcessRunner.run(pmsetPath, ["-g"])
+        guard result.exitCode == 0 else { return nil }
+        return parseSleepDisabled(result.stdout)
     }
 
-    /// 检查当前用户是否已配置免密执行 `pmset -a disablesleep 0/1`。
+    static func parseSleepDisabled(_ output: String) -> Bool? {
+        for line in output.split(separator: "\n") {
+            let parts = line.split(whereSeparator: \.isWhitespace)
+            guard parts.first == "SleepDisabled" else { continue }
+            switch parts.last {
+            case "1": return true
+            case "0": return false
+            default: return nil
+            }
+        }
+        // 未设置该键时，pmset 的有效设置中通常没有 SleepDisabled 一行。
+        return output.contains("Currently in use:") ? false : nil
+    }
+
     static var isPasswordlessConfigured: Bool {
-        let canDisable = ProcessRunner.run("/usr/bin/sudo", ["-n", "-l", pmsetPath, "-a", "disablesleep", "0"]).exitCode == 0
-        let canEnable = ProcessRunner.run("/usr/bin/sudo", ["-n", "-l", pmsetPath, "-a", "disablesleep", "1"]).exitCode == 0
-        return canDisable && canEnable
+        ["0", "1"].allSatisfy { value in
+            ProcessRunner.run("/usr/bin/sudo", ["-n", "-k", "-l", pmsetPath, "-a", "disablesleep", value]).exitCode == 0
+        }
     }
 
-    /// 设置 disablesleep：优先免密 `sudo -n`；未配置时弹一次管理员框（开启时顺带安装免密白名单）。
-    @discardableResult
-    static func setEnabled(_ enable: Bool) -> String? {
-        let value = enable ? 1 : 0
-        let sudoResult = ProcessRunner.run("/usr/bin/sudo", ["-n", pmsetPath, "-a", "disablesleep", "\(value)"])
-        if sudoResult.exitCode == 0 {
-            return nil
+    static func setEnabled(_ enable: Bool, allowPrompt: Bool = true) -> String? {
+        let value = enable ? "1" : "0"
+        let result = ProcessRunner.run("/usr/bin/sudo", ["-n", "-k", pmsetPath, "-a", "disablesleep", value])
+        if result.exitCode == 0 { return nil }
+        guard allowPrompt else { return "需要管理员授权才能恢复系统睡眠" }
+        if enable {
+            return runAsAdministrator(passwordlessInstallCommand(enableSleepOverride: true), failure: "设置失败")
         }
-
-        if enable, let result = enableAndInstallPasswordless() {
-            switch result {
-            case .success:
-                return nil
-            case .failure(let message):
-                return message
-            }
-        }
-
-        let script = "do shell script \"\(pmsetPath) -a disablesleep \(value)\" with administrator privileges"
-        let result = ProcessRunner.run("/usr/bin/osascript", ["-e", script])
-        if result.exitCode == 0 {
-            return nil
-        }
-        let msg = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-        if msg.contains("(-128)") {
-            return "已取消管理员授权"
-        }
-        return msg.isEmpty ? "设置失败（exit \(result.exitCode)）" : msg
+        return runAsAdministrator("\(pmsetPath) -a disablesleep \(value)", failure: "设置失败")
     }
 
-    private enum CombinedInstallResult {
-        case success
-        case failure(String)
-    }
-
-    /// 一次管理员授权同时完成：校验并安装 sudoers 白名单 + 开启 disablesleep 1。
-    /// 若前置校验无法进行则返回 nil，交由常规单次弹窗路径处理。
-    private static func enableAndInstallPasswordless() -> CombinedInstallResult? {
-        let user = NSUserName()
-        guard user.range(of: "^[A-Za-z0-9._-]+$", options: .regularExpression) != nil else {
-            return nil
-        }
-
-        let rule = "\(user) ALL=(root) NOPASSWD: \(pmsetPath) -a disablesleep 0, \(pmsetPath) -a disablesleep 1\n"
-        let tmpURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("screenmaintainer-sudoers-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: tmpURL) }
-
-        do {
-            try rule.write(to: tmpURL, atomically: true, encoding: .utf8)
-        } catch {
-            return nil
-        }
-
-        let check = ProcessRunner.run("/usr/sbin/visudo", ["-cf", tmpURL.path])
-        guard check.exitCode == 0 else { return nil }
-
-        let escapedTmp = tmpURL.path.replacingOccurrences(of: "'", with: "'\\''")
-        let cmd = "/usr/sbin/visudo -cf '\(escapedTmp)' && /usr/bin/install -o root -g wheel -m 0440 '\(escapedTmp)' '\(sudoersPath)' && \(pmsetPath) -a disablesleep 1"
-        let appleScriptCmd = cmd.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
-        let script = "do shell script \"\(appleScriptCmd)\" with administrator privileges"
-        let result = ProcessRunner.run("/usr/bin/osascript", ["-e", script])
-        if result.exitCode == 0 {
-            return .success
-        }
-        let msg = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-        if msg.contains("(-128)") {
-            return .failure("已取消管理员授权")
-        }
-        return .failure(msg.isEmpty ? "设置失败（exit \(result.exitCode)）" : msg)
-    }
-
-    /// 单独写入 `/etc/sudoers.d/screenmaintainer`，仅精确放行 `disablesleep 0/1`。
     static func installPasswordlessRule() -> String? {
-        let user = NSUserName()
-        guard user.range(of: "^[A-Za-z0-9._-]+$", options: .regularExpression) != nil else {
-            return "用户名格式不支持自动配置"
-        }
-
-        let rule = "\(user) ALL=(root) NOPASSWD: \(pmsetPath) -a disablesleep 0, \(pmsetPath) -a disablesleep 1\n"
-        let tmpURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("screenmaintainer-sudoers-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: tmpURL) }
-
-        do {
-            try rule.write(to: tmpURL, atomically: true, encoding: .utf8)
-        } catch {
-            return "写入临时规则失败：\(error.localizedDescription)"
-        }
-
-        let check = ProcessRunner.run("/usr/sbin/visudo", ["-cf", tmpURL.path])
-        guard check.exitCode == 0 else { return "sudoers 语法校验失败" }
-
-        let escapedTmp = tmpURL.path.replacingOccurrences(of: "'", with: "'\\''")
-        let cmd = "/usr/sbin/visudo -cf '\(escapedTmp)' && /usr/bin/install -o root -g wheel -m 0440 '\(escapedTmp)' '\(sudoersPath)'"
-        let appleScriptCmd = cmd.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
-        let script = "do shell script \"\(appleScriptCmd)\" with administrator privileges"
-        let result = ProcessRunner.run("/usr/bin/osascript", ["-e", script])
-        if result.exitCode == 0 {
-            return nil
-        }
-        let msg = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-        if msg.contains("(-128)") {
-            return "已取消管理员授权"
-        }
-        return msg.isEmpty ? "配置免密失败（exit \(result.exitCode)）" : msg
+        runAsAdministrator(passwordlessInstallCommand(enableSleepOverride: false), failure: "配置免密失败")
     }
 
-    /// 移除 `/etc/sudoers.d/screenmaintainer` 免密规则。
+    /// 在 sudoers 目录内创建仅管理员可访问的暂存目录，再原子移入已校验文件。
+    /// 点号开头的路径不会被 sudoers 的 includedir 当作规则文件读取。
+    private static func passwordlessInstallCommand(enableSleepOverride: Bool) -> String {
+        // 数字 UID 精确匹配当前账户，不会被 sudoers 解释成用户名别名。
+        let rule = "#\(getuid()) ALL=(root) NOPASSWD: \(pmsetPath) -a disablesleep 0, \(pmsetPath) -a disablesleep 1"
+        let install = """
+        set -eu
+        umask 077
+        stage=$(/usr/bin/mktemp -d /private/etc/sudoers.d/.screenmaintainer.XXXXXXXX)
+        trap '/bin/unlink "$stage/rule" 2>/dev/null || :; /bin/rmdir "$stage"' EXIT
+        /usr/bin/printf '%s\\n' '\(rule)' > "$stage/rule"
+        /usr/sbin/chown root:wheel "$stage/rule"
+        /bin/chmod 0440 "$stage/rule"
+        /usr/sbin/visudo -cf "$stage/rule"
+        [ ! -d '\(sudoersPath)' ]
+        /bin/mv -fh "$stage/rule" '\(sudoersPath)'
+        """
+        return enableSleepOverride ? install + "\n\(pmsetPath) -a disablesleep 1" : install
+    }
+
     static func removePasswordlessRule() -> String? {
-        let script = "do shell script \"/bin/rm -f '\(sudoersPath)'\" with administrator privileges"
+        runAsAdministrator("if [ -e '\(sudoersPath)' ] || [ -L '\(sudoersPath)' ]; then /bin/unlink '\(sudoersPath)'; fi",
+                           failure: "移除免密失败")
+    }
+
+    private static func runAsAdministrator(_ command: String, failure: String) -> String? {
+        let escaped = command.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: "\\n")
+        let script = "do shell script \"\(escaped)\" with administrator privileges"
         let result = ProcessRunner.run("/usr/bin/osascript", ["-e", script])
-        if result.exitCode == 0 {
-            return nil
-        }
-        let msg = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-        if msg.contains("(-128)") {
-            return "已取消管理员授权"
-        }
-        return msg.isEmpty ? "移除免密失败（exit \(result.exitCode)）" : msg
+        if result.exitCode == 0 { return nil }
+        let message = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        if message.contains("(-128)") { return "已取消管理员授权" }
+        return message.isEmpty ? "\(failure)（exit \(result.exitCode)）" : message
     }
 }

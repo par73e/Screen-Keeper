@@ -55,7 +55,7 @@ ScreenMaintainer --activate systemAwake --seconds 60  # 以指定模式启动 60
 
 ## 故障排查与卸载
 
-若异常退出导致系统残留 `SleepDisabled 1`，重新打开 App 会自动或提示一键恢复，也可手动执行：
+若异常退出导致系统残留 `SleepDisabled 1`，重新打开 App 会尝试恢复由本 App 开启的合盖模式。需要管理员授权或无法判断设置来源时，可在面板中点「恢复」，也可手动执行：
 
 ```bash
 sudo pmset -a disablesleep 0

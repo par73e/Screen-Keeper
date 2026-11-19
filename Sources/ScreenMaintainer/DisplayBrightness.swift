@@ -49,9 +49,10 @@ enum DisplayBrightness {
         return min(1, max(0, value))
     }
 
-    static func set(_ value: Float) {
+    @discardableResult
+    static func set(_ value: Float) -> Bool {
         cancelAnimation()
-        applyImmediate(value)
+        return applyImmediate(value)
     }
 
     static func cancelAnimation() {
@@ -60,15 +61,18 @@ enum DisplayBrightness {
     }
 
     /// 平滑过渡到目标亮度（必须在主线程调用）
-    static func animate(to target: Float, duration: TimeInterval = 0.55) {
+    static func animate(to target: Float, duration: TimeInterval = 0.55,
+                        completion: ((Bool) -> Void)? = nil) {
         cancelAnimation()
         let clampedTarget = min(1, max(0, target))
         guard let start = current() else {
-            applyImmediate(clampedTarget)
+            let applied = applyImmediate(clampedTarget)
+            completion?(applied)
             return
         }
         if abs(start - clampedTarget) < 0.01 {
-            applyImmediate(clampedTarget)
+            let applied = applyImmediate(clampedTarget)
+            completion?(applied)
             return
         }
 
@@ -80,21 +84,23 @@ enum DisplayBrightness {
             // easeOutCubic 让亮度升降手感更接近系统调节
             let eased = 1 - pow(1 - progress, 3)
             let value = start + (clampedTarget - start) * eased
-            applyImmediate(value)
+            let applied = applyImmediate(value)
             if step >= steps {
                 t.invalidate()
                 if animationTimer === t {
                     animationTimer = nil
                 }
+                completion?(applied)
             }
         }
         RunLoop.main.add(timer, forMode: .common)
         animationTimer = timer
     }
 
-    private static func applyImmediate(_ value: Float) {
-        guard let syms = symbols, let id = builtinDisplayID() else { return }
-        if let can = syms.can, !can(id) { return }
-        _ = syms.set(id, min(1, max(0, value)))
+    @discardableResult
+    private static func applyImmediate(_ value: Float) -> Bool {
+        guard let syms = symbols, let id = builtinDisplayID() else { return false }
+        if let can = syms.can, !can(id) { return false }
+        return syms.set(id, min(1, max(0, value))) == 0
     }
 }

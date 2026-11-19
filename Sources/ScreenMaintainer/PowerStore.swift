@@ -29,7 +29,8 @@ final class PowerStore: ObservableObject {
 
     // MARK: - 发布状态
 
-    @Published var mode: KeepAwakeMode = .off
+    @Published private(set) var mode: KeepAwakeMode = .off
+    @Published private(set) var assertionError: String?
     @Published var deadline: Date? = nil
     @Published var remainingText = ""
     /// 本次激活的总时长（水位动画的分母）
@@ -66,7 +67,7 @@ final class PowerStore: ObservableObject {
     @Published var holdersSummaryText = "…"
 
     @Published var clamshellOn = false
-    @Published var clamshellBusy = false
+    @Published private(set) var clamshellBusy = true
     @Published var clamshellError: String? = nil
     @Published var clamshellConfirmNeeded = false
     @Published var clamshellLeftover = false
@@ -81,7 +82,13 @@ final class PowerStore: ObservableObject {
     private var tickCount = 0
     private var clamshellDimTimer: Timer?
     private var lidWasClosedDuringClamshell = false
-    private var autoOpenLidRestoreTriggered = false
+    private var ownsClamshellOverride = false
+    private var clamshellEnabling = false
+    private var clamshellDisabling = false
+    private var clamshellDisableRequested = false
+    private var terminationReply: ((Bool) -> Void)?
+    private var brightnessRestorePending = false
+    private var brightnessRestoreInFlight = false
     private var savedBrightnessBeforeClamshell: Float? = nil
 
     var iconState: MenuBarIcon.State {
@@ -107,36 +114,25 @@ final class PowerStore: ObservableObject {
         if let saved = d.object(forKey: Keys.savedBrightnessBeforeClamshell) as? Double {
             savedBrightnessBeforeClamshell = Float(saved)
         }
-        let clamshellIntent = d.bool(forKey: Keys.clamshellOn)
+        ownsClamshellOverride = d.bool(forKey: Keys.clamshellOn)
+        brightnessRestorePending = savedBrightnessBeforeClamshell != nil
 
         if let cliMode = LaunchOptions.initialMode, cliMode != .off {
-            // CLI 测试路径：不写 UserDefaults，不污染用户设置
-            mode = cliMode
-            let dur = LaunchOptions.seconds ?? durationChoice
-            if dur > 0 {
-                deadline = Date().addingTimeInterval(dur)
-                remainingText = Self.formatRemaining(dur)
-            }
-            activeDuration = dur
-            applyAssertions()
+            startMode(cliMode, remaining: LaunchOptions.seconds ?? durationChoice)
         } else if restoreOnLaunch,
                   let raw = d.string(forKey: Keys.mode),
                   let restored = KeepAwakeMode(rawValue: raw),
                   restored != .off {
             if let ts = d.object(forKey: Keys.deadline) as? Double {
-                let dl = Date(timeIntervalSince1970: ts)
-                if dl > Date() {
-                    mode = restored
-                    deadline = dl
-                    remainingText = Self.formatRemaining(dl.timeIntervalSinceNow)
-                    activeDuration = dl.timeIntervalSinceNow
-                    applyAssertions()
+                let remaining = Date(timeIntervalSince1970: ts).timeIntervalSinceNow
+                if remaining > 0 {
+                    startMode(restored, remaining: remaining)
+                    if mode == restored { deadline = Date(timeIntervalSince1970: ts) }
                 } else {
-                    persistMode() // 定时在关机期间已过期 → 保持关闭
+                    persistMode()
                 }
             } else {
-                mode = restored
-                applyAssertions()
+                startMode(restored, remaining: 0)
             }
         }
 
@@ -150,79 +146,47 @@ final class PowerStore: ObservableObject {
 
         pollPowerSource()
 
-        // 同步「合盖不睡眠」的系统真实状态与免密状态；若有异常退出残留且已配置免密，则静默还原
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            var actual = ClamshellMode.isSleepDisabled
-            let passwordless = ClamshellMode.isPasswordlessConfigured
-            var leftover = actual && !clamshellIntent
-            if leftover && passwordless {
-                _ = ClamshellMode.setEnabled(false)
-                actual = ClamshellMode.isSleepDisabled
-                leftover = false
-            }
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.clamshellOn = actual
-                self.clamshellPasswordless = passwordless
-                self.clamshellLeftover = leftover
-                if actual != clamshellIntent {
-                    Self.defaults.set(actual, forKey: Keys.clamshellOn)
-                }
-                if actual {
-                    self.lidWasClosedDuringClamshell = ClamshellMode.isLidClosed
-                } else if self.savedBrightnessBeforeClamshell != nil {
-                    self.restoreBrightnessAfterClamshell(animated: false)
-                }
-            }
-        }
+        reconcileClamshellOnLaunch()
     }
 
     // MARK: - 模式切换
 
+    private func startMode(_ newMode: KeepAwakeMode, remaining: TimeInterval) {
+        assertionError = assertions.apply(newMode)
+        guard assertionError == nil else { return }
+        mode = newMode
+        if remaining > 0 {
+            deadline = Date().addingTimeInterval(remaining)
+            remainingText = Self.formatRemaining(remaining)
+        }
+        activeDuration = remaining
+    }
+
     func activate(_ newMode: KeepAwakeMode) {
         guard newMode != .off else { deactivate(); return }
-        let wasOff = (mode == .off)
-        mode = newMode
-        if wasOff {
-            if durationChoice > 0 {
-                deadline = Date().addingTimeInterval(durationChoice)
-                remainingText = Self.formatRemaining(durationChoice)
-            } else {
-                deadline = nil
-                remainingText = ""
-            }
-            activeDuration = durationChoice
+        guard terminationReply == nil else { return }
+        if mode == .off {
+            startMode(newMode, remaining: durationChoice)
+        } else {
+            assertionError = assertions.apply(newMode)
+            if assertionError == nil { mode = newMode }
         }
-        applyAssertions()
+        guard assertionError == nil else { return }
         persistMode()
         refreshHolders()
     }
 
     func deactivate() {
+        assertionError = assertions.apply(.off)
         mode = .off
         deadline = nil
         remainingText = ""
         activeDuration = 0
         clamshellConfirmNeeded = false
-        applyAssertions()
         persistMode()
         refreshHolders()
-        if clamshellOn {
+        if clamshellEnabling || ownsClamshellOverride {
             setClamshellEnabled(false)
-        }
-    }
-
-    private func applyAssertions() {
-        assertions.releaseAll()
-        switch mode {
-        case .off:
-            break
-        case .systemAwake:
-            assertions.preventSystemSleep(
-                reason: "ScreenMaintainer: keep system awake for background agents/tasks (display may sleep)")
-        case .displayAwake:
-            assertions.preventDisplaySleep(
-                reason: "ScreenMaintainer: keep display and system awake")
         }
     }
 
@@ -247,21 +211,16 @@ final class PowerStore: ObservableObject {
             }
         }
 
-        if clamshellOn {
-            let lidClosed = ClamshellMode.isLidClosed
+        if clamshellOn && ownsClamshellOverride && !clamshellLeftover,
+           let lidClosed = ClamshellMode.lidClosed {
             if lidClosed {
                 lidWasClosedDuringClamshell = true
-            } else if lidWasClosedDuringClamshell && !autoOpenLidRestoreTriggered {
-                // 检测到「合盖 -> 开盖」：立即自动抬回原亮度，并触发自动关闭合盖保持运行
-                autoOpenLidRestoreTriggered = true
+            } else if lidWasClosedDuringClamshell {
                 lidWasClosedDuringClamshell = false
-                cancelClamshellDimTimer()
-                restoreBrightnessAfterClamshell(animated: true)
-                if !clamshellBusy {
-                    setClamshellEnabled(false)
-                }
+                setClamshellEnabled(false)
             }
         }
+        restoreBrightnessIfNeeded(animated: true)
 
         tickCount += 1
         if tickCount % 10 == 0 {
@@ -336,63 +295,161 @@ final class PowerStore: ObservableObject {
         clamshellConfirmNeeded = false
     }
 
+    /// AppKit 在等待 terminateLater 时使用 modalPanel 模式，不会消费普通主队列回调。
+    private static func deliverClamshellResult(_ callback: @escaping () -> Void) {
+        let modes = [RunLoop.Mode.modalPanel.rawValue, RunLoop.Mode.common.rawValue]
+        let mainRunLoop = CFRunLoopGetMain()
+        CFRunLoopPerformBlock(mainRunLoop, modes as CFArray, callback)
+        CFRunLoopWakeUp(mainRunLoop)
+    }
+
+    private func reconcileClamshellOnLaunch() {
+        let needsRecovery = ownsClamshellOverride
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            var actual = ClamshellMode.sleepDisabled
+            var error: String?
+            if needsRecovery && actual != false {
+                error = ClamshellMode.setEnabled(false, allowPrompt: false)
+                actual = ClamshellMode.sleepDisabled
+            }
+            let passwordless = ClamshellMode.isPasswordlessConfigured
+            Self.deliverClamshellResult {
+                guard let self else { return }
+                self.clamshellPasswordless = passwordless
+                self.updateClamshellRecovery(actual: actual, error: error)
+                self.restoreBrightnessIfNeeded(animated: false)
+                self.clamshellBusy = false
+                self.continueClamshellCleanup()
+            }
+        }
+    }
+
     func setClamshellPasswordless(_ enable: Bool) {
-        guard !clamshellPasswordlessBusy else { return }
+        guard !clamshellBusy, !clamshellPasswordlessBusy, terminationReply == nil else { return }
         clamshellPasswordlessBusy = true
         clamshellError = nil
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let err = enable
+            let error = enable
                 ? ClamshellMode.installPasswordlessRule()
                 : ClamshellMode.removePasswordlessRule()
             let actual = ClamshellMode.isPasswordlessConfigured
-            DispatchQueue.main.async {
+            Self.deliverClamshellResult {
                 guard let self else { return }
                 self.clamshellPasswordlessBusy = false
                 self.clamshellPasswordless = actual
-                if let err {
-                    self.clamshellError = err
-                }
+                self.clamshellError = error
+                self.continueClamshellCleanup()
             }
         }
     }
 
     func setClamshellEnabled(_ enable: Bool) {
-        guard !clamshellBusy else { return }
+        if !enable {
+            guard !clamshellDisabling else { return }
+            clamshellDisableRequested = true
+            continueClamshellCleanup()
+            return
+        }
+        guard mode != .off, !clamshellBusy, !clamshellPasswordlessBusy, terminationReply == nil else { return }
         clamshellBusy = true
+        clamshellEnabling = true
         clamshellError = nil
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let err = ClamshellMode.setEnabled(enable)
-            let actual = ClamshellMode.isSleepDisabled
-            let passwordless = ClamshellMode.isPasswordlessConfigured
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.clamshellBusy = false
-                self.clamshellError = err
-                self.clamshellOn = actual
-                self.clamshellPasswordless = passwordless
-                if actual {
-                    self.clamshellLeftover = false
-                    if enable && err == nil {
-                        self.beginClamshellBrightnessAndLidTracking()
-                    }
+            let initial = ClamshellMode.sleepDisabled
+            var actual = initial
+            var error: String?
+            if initial == false {
+                // 授权尚未完成时也保留记录，覆盖命令成功后进程立即退出的情况。
+                Self.defaults.set(true, forKey: Keys.clamshellOn)
+                if Self.defaults.synchronize() {
+                    error = ClamshellMode.setEnabled(true)
+                    actual = ClamshellMode.sleepDisabled
                 } else {
-                    self.cancelClamshellDimTimer()
-                    self.lidWasClosedDuringClamshell = false
-                    self.autoOpenLidRestoreTriggered = false
-                    self.restoreBrightnessAfterClamshell(animated: true)
+                    error = "无法保存睡眠恢复记录"
                 }
-                Self.defaults.set(actual, forKey: Keys.clamshellOn)
+            } else if initial == nil {
+                error = "无法读取系统睡眠设置，请重试"
+            }
+            let passwordless = ClamshellMode.isPasswordlessConfigured
+            Self.deliverClamshellResult {
+                guard let self else { return }
+                self.clamshellEnabling = false
+                self.clamshellPasswordless = passwordless
+                self.ownsClamshellOverride = Self.defaults.bool(forKey: Keys.clamshellOn)
+                let canContinue = initial == false && actual == true && error == nil
+                    && !self.clamshellDisableRequested && self.terminationReply == nil && self.mode != .off
+                if canContinue {
+                    self.clamshellOn = true
+                    self.clamshellLeftover = false
+                    self.beginClamshellBrightnessAndLidTracking()
+                } else {
+                    self.updateClamshellRecovery(actual: actual, error: error ?? (actual == false && initial == false
+                        ? "系统未开启合盖不睡眠，请重试" : nil))
+                    if initial == false && self.ownsClamshellOverride {
+                        self.clamshellDisableRequested = true
+                    } else if initial == true && !self.ownsClamshellOverride {
+                        // 此次开启并未修改系统，撤销不影响其他应用的设置。
+                        self.clamshellDisableRequested = false
+                    }
+                }
+                self.clamshellBusy = false
+                self.continueClamshellCleanup()
             }
         }
     }
 
-    private func beginClamshellBrightnessAndLidTracking() {
-        if savedBrightnessBeforeClamshell == nil, let current = DisplayBrightness.current() {
-            savedBrightnessBeforeClamshell = current
-            Self.defaults.set(Double(current), forKey: Keys.savedBrightnessBeforeClamshell)
+    private func continueClamshellCleanup() {
+        guard !clamshellBusy, !clamshellPasswordlessBusy else { return }
+        if clamshellDisableRequested || (terminationReply != nil && ownsClamshellOverride) {
+            clamshellDisableRequested = false
+            if clamshellOn || ownsClamshellOverride {
+                disableClamshell()
+                return
+            }
         }
-        lidWasClosedDuringClamshell = ClamshellMode.isLidClosed
-        autoOpenLidRestoreTriggered = false
+        finishTermination(allow: true)
+    }
+
+    private func disableClamshell() {
+        clamshellBusy = true
+        clamshellDisabling = true
+        clamshellError = nil
+        lidWasClosedDuringClamshell = false
+        cancelClamshellDimTimer()
+        queueBrightnessRestore()
+        restoreBrightnessIfNeeded(animated: terminationReply == nil)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            var actual = ClamshellMode.sleepDisabled
+            var error: String?
+            if actual != false {
+                error = ClamshellMode.setEnabled(false)
+                actual = ClamshellMode.sleepDisabled
+            }
+            let passwordless = ClamshellMode.isPasswordlessConfigured
+            Self.deliverClamshellResult {
+                guard let self else { return }
+                self.clamshellDisabling = false
+                self.clamshellPasswordless = passwordless
+                self.updateClamshellRecovery(actual: actual, error: error ?? (actual == true ? "系统仍禁止睡眠，请重试" : nil))
+                self.clamshellBusy = false
+                self.finishTermination(allow: actual == false || !self.ownsClamshellOverride)
+            }
+        }
+    }
+
+    /// 读取成功且系统确认恢复后，才删除本 App 的恢复记录。
+    private func updateClamshellRecovery(actual: Bool?, error: String?) {
+        if let actual { clamshellOn = actual }
+        if actual == false {
+            ownsClamshellOverride = false
+            Self.defaults.removeObject(forKey: Keys.clamshellOn)
+        }
+        clamshellLeftover = clamshellOn || ownsClamshellOverride
+        clamshellError = error ?? (actual == nil ? "无法确认系统睡眠状态，请重试恢复" : nil)
+    }
+
+    private func beginClamshellBrightnessAndLidTracking() {
+        lidWasClosedDuringClamshell = ClamshellMode.lidClosed == true
         startClamshellDimCountdown()
     }
 
@@ -401,19 +458,17 @@ final class PowerStore: ObservableObject {
         clamshellDimCountdown = 3
         let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] t in
             guard let self else { t.invalidate(); return }
-            guard self.clamshellOn else {
-                self.cancelClamshellDimTimer()
-                return
-            }
             let next = (self.clamshellDimCountdown ?? 1) - 1
             if next > 0 {
                 self.clamshellDimCountdown = next
-            } else {
-                self.cancelClamshellDimTimer()
-                let current = DisplayBrightness.current() ?? 1.0
-                let target: Float = min(current, 0.10)
-                DisplayBrightness.animate(to: target, duration: 0.45)
+                return
             }
+            self.cancelClamshellDimTimer()
+            guard !self.brightnessRestorePending, let current = DisplayBrightness.current(), current > 0.10 else { return }
+            self.savedBrightnessBeforeClamshell = current
+            Self.defaults.set(Double(current), forKey: Keys.savedBrightnessBeforeClamshell)
+            guard Self.defaults.synchronize() else { return }
+            DisplayBrightness.animate(to: 0.10, duration: 0.45)
         }
         RunLoop.main.add(timer, forMode: .common)
         clamshellDimTimer = timer
@@ -425,40 +480,54 @@ final class PowerStore: ObservableObject {
         clamshellDimCountdown = nil
     }
 
-    private func restoreBrightnessAfterClamshell(animated: Bool) {
-        guard let saved = savedBrightnessBeforeClamshell else { return }
-        savedBrightnessBeforeClamshell = nil
-        Self.defaults.removeObject(forKey: Keys.savedBrightnessBeforeClamshell)
+    private func queueBrightnessRestore() {
+        guard !brightnessRestorePending, savedBrightnessBeforeClamshell != nil else { return }
+        DisplayBrightness.cancelAnimation()
+        brightnessRestorePending = true
+    }
 
-        let target = max(saved, DisplayBrightness.current() ?? saved)
-        if animated {
-            DisplayBrightness.animate(to: target, duration: 0.55)
-            // 开盖唤醒瞬间内置屏可能延迟 ~0.5s 才重新上电，二次兜底确保亮度确实抬起
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.65) { [weak self] in
-                guard let self, !self.clamshellOn || self.autoOpenLidRestoreTriggered else { return }
-                if let cur = DisplayBrightness.current(), cur + 0.03 < target {
-                    DisplayBrightness.animate(to: target, duration: 0.35)
-                }
-            }
+    private func restoreBrightnessIfNeeded(animated: Bool) {
+        guard brightnessRestorePending, !brightnessRestoreInFlight,
+              let saved = savedBrightnessBeforeClamshell, let current = DisplayBrightness.current() else { return }
+        let target = max(saved, current)
+        brightnessRestoreInFlight = true
+        let complete: (Bool) -> Void = { [weak self] applied in
+            guard let self else { return }
+            self.brightnessRestoreInFlight = false
+            guard applied, let verified = DisplayBrightness.current(), verified + 0.02 >= saved else { return }
+            self.brightnessRestorePending = false
+            self.savedBrightnessBeforeClamshell = nil
+            Self.defaults.removeObject(forKey: Keys.savedBrightnessBeforeClamshell)
+        }
+        if current >= saved {
+            complete(true)
+        } else if animated {
+            DisplayBrightness.animate(to: target, duration: 0.55, completion: complete)
         } else {
-            DisplayBrightness.set(target)
+            complete(DisplayBrightness.set(target))
         }
     }
 
-    /// App 退出时调用：若「合盖不睡眠」处于开启状态，自动还原亮度与系统默认。
-    /// 授权弹窗由 SecurityAgent（独立进程）渲染，因此可以在退出流程中同步等待。
-    func handleAppTermination() {
+    /// 返回 true 时由 AppKit 等待异步清理结果，确保在途的开启命令也有机会撤销。
+    func prepareForTermination(reply: @escaping (Bool) -> Void) -> Bool {
+        if terminationReply != nil { return true }
         cancelClamshellDimTimer()
-        if let saved = savedBrightnessBeforeClamshell {
-            savedBrightnessBeforeClamshell = nil
-            Self.defaults.removeObject(forKey: Keys.savedBrightnessBeforeClamshell)
-            DisplayBrightness.set(max(saved, DisplayBrightness.current() ?? saved))
+        queueBrightnessRestore()
+        if brightnessRestoreInFlight {
+            DisplayBrightness.cancelAnimation()
+            brightnessRestoreInFlight = false
         }
-        let intent = Self.defaults.bool(forKey: Keys.clamshellOn)
-        Self.defaults.set(false, forKey: Keys.clamshellOn)
-        if intent && ClamshellMode.isSleepDisabled {
-            ClamshellMode.setEnabled(false)
-        }
+        restoreBrightnessIfNeeded(animated: false)
+        guard clamshellBusy || clamshellPasswordlessBusy || ownsClamshellOverride else { return false }
+        terminationReply = reply
+        continueClamshellCleanup()
+        return true
+    }
+
+    private func finishTermination(allow: Bool) {
+        guard let reply = terminationReply else { return }
+        terminationReply = nil
+        reply(allow)
     }
 
     // MARK: - 登录项

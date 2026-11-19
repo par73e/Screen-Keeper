@@ -14,6 +14,7 @@ enum AssertionReader {
         "PreventUserIdleDisplaySleep",
         "PreventSystemSleep",
         "NoDisplaySleepAssertion",
+        "NoIdleSleepAssertion",
     ]
 
     private static let labels: [String: String] = [
@@ -21,6 +22,7 @@ enum AssertionReader {
         "PreventSystemSleep": "防系统睡眠（强制）",
         "PreventUserIdleDisplaySleep": "防息屏",
         "NoDisplaySleepAssertion": "防息屏",
+        "NoIdleSleepAssertion": "防系统睡眠",
     ]
 
     static func currentHolders() -> [AssertionHolder] {
@@ -69,7 +71,9 @@ enum AssertionReader {
         var seen = Set<String>()
         var lines: [String] = []
         for h in holders {
-            let key = "\(h.process)|\(h.assertion)"
+            let type = h.assertion == "NoIdleSleepAssertion" ? "PreventUserIdleSystemSleep"
+                : h.assertion == "NoDisplaySleepAssertion" ? "PreventUserIdleDisplaySleep" : h.assertion
+            let key = "\(h.process)|\(type)"
             guard !seen.contains(key) else { continue }
             seen.insert(key)
             var label = labels[h.assertion] ?? h.assertion

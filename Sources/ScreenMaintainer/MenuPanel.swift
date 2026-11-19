@@ -16,6 +16,11 @@ struct MenuPanel: View {
         VStack(alignment: .leading, spacing: 6) {
             header
             modeSection
+            if let error = store.assertionError {
+                Text(error)
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.orange)
+            }
             scheduleSection
             clamshellSection
             optionsSection
@@ -214,8 +219,12 @@ struct MenuPanel: View {
         store.mode == .off && !store.clamshellOn
     }
 
+    private var clamshellControlsBusy: Bool {
+        store.clamshellBusy || store.clamshellPasswordlessBusy
+    }
+
     private func toggleClamshell() {
-        guard !store.clamshellBusy, !clamshellLocked else { return }
+        guard !clamshellControlsBusy, !clamshellLocked else { return }
         if store.clamshellOn {
             store.setClamshellEnabled(false)
         } else if store.clamshellConfirmNeeded {
@@ -260,7 +269,7 @@ struct MenuPanel: View {
                         Toggle("", isOn: .constant(store.clamshellOn))
                             .labelsHidden()
                             .controlSize(.mini)
-                            .disabled(store.clamshellBusy || clamshellLocked)
+                            .disabled(clamshellControlsBusy || clamshellLocked)
                             .allowsHitTesting(false)
                     }
                     .padding(.horizontal, 9)
@@ -269,7 +278,7 @@ struct MenuPanel: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .disabled(store.clamshellBusy || clamshellLocked)
+                .disabled(clamshellControlsBusy || clamshellLocked)
                 .opacity(clamshellLocked ? 0.58 : 1)
 
                 if hasClamshellExtras {
@@ -281,6 +290,7 @@ struct MenuPanel: View {
                                     .foregroundStyle(.orange)
                                 HStack(spacing: 6) {
                                     Button("仍要开启") { store.confirmClamshellEnable() }
+                                        .disabled(clamshellControlsBusy)
                                         .buttonStyle(AppleGlassButtonStyle(tint: .orange, prominent: true, compact: true))
                                     Button("取消") { store.cancelClamshellConfirm() }
                                         .buttonStyle(AppleGlassButtonStyle(compact: true))
@@ -299,16 +309,17 @@ struct MenuPanel: View {
 
                         if store.clamshellLeftover {
                             HStack(spacing: 6) {
-                                Text("系统仍处于「合盖不睡眠」")
+                                Text(store.clamshellOn ? "系统仍处于「合盖不睡眠」" : "系统睡眠状态尚未确认")
                                     .font(.system(size: 9.5))
                                     .foregroundStyle(.red)
                                 Spacer()
                                 Button("恢复") { store.setClamshellEnabled(false) }
+                                    .disabled(clamshellControlsBusy)
                                     .buttonStyle(AppleGlassButtonStyle(compact: true))
                             }
                         }
 
-                        if store.clamshellOn {
+                        if store.clamshellOn && !store.clamshellLeftover {
                             HStack(spacing: 6) {
                                 if let sec = store.clamshellDimCountdown {
                                     Text("已开启 · \(sec) 秒后亮度降至 10%")
@@ -321,6 +332,7 @@ struct MenuPanel: View {
                                 }
                                 Spacer()
                                 Button("立即恢复") { store.setClamshellEnabled(false) }
+                                    .disabled(clamshellControlsBusy)
                                     .buttonStyle(AppleGlassButtonStyle(compact: true))
                             }
                         }
@@ -530,7 +542,7 @@ private struct OptionsAccordion: View {
                                                 set: { store.setClamshellPasswordless($0) }),
                                   title: "合盖模式免密",
                                   subtitle: store.clamshellPasswordless ? "已授权，免密开关" : "授权一次，后续免密")
-                            .disabled(store.clamshellPasswordlessBusy)
+                            .disabled(store.clamshellPasswordlessBusy || store.clamshellBusy)
                     }
                 }
             }

@@ -78,7 +78,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusBarController = StatusBarController(store: PowerStore.shared)
     }
 
-    func applicationWillTerminate(_ notification: Notification) {
-        PowerStore.shared.handleAppTermination()
+    @MainActor
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let store = PowerStore.shared
+        let waiting = store.prepareForTermination { allow in
+            sender.reply(toApplicationShouldTerminate: allow)
+            if !allow {
+                DispatchQueue.main.async {
+                    let alert = NSAlert()
+                    alert.messageText = "系统睡眠设置尚未恢复"
+                    alert.informativeText = store.clamshellError ?? "请在菜单栏面板中重试恢复。"
+                    sender.activate()
+                    alert.runModal()
+                }
+            }
+        }
+        return waiting ? .terminateLater : .terminateNow
     }
 }
